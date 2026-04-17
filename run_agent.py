@@ -81,7 +81,7 @@ from agent.error_classifier import classify_api_error, FailoverReason
 from agent.prompt_builder import (
     DEFAULT_AGENT_IDENTITY, PLATFORM_HINTS,
     MEMORY_GUIDANCE, SESSION_SEARCH_GUIDANCE, SKILLS_GUIDANCE,
-    build_nous_subscription_prompt,
+    build_nous_subscription_prompt, HUMAN_WRITING_GUIDANCE,
 )
 from agent.model_metadata import (
     fetch_model_metadata,
@@ -106,6 +106,10 @@ from agent.trajectory import (
     convert_scratchpad_to_think, has_incomplete_scratchpad,
     save_trajectory as _save_trajectory_to_file,
 )
+from agent.proactive_planner import ProactivePlanner
+from agent.outcome_evaluator import OutcomeEvaluator
+from agent.trajectory_index import TrajectoryIndex
+from agent.complexity_analyzer import ComplexityAnalyzer
 from utils import atomic_json_write, env_var_enabled
 
 
@@ -1153,6 +1157,32 @@ class AIAgent:
         
         # Track conversation messages for session logging
         self._session_messages: List[Dict[str, Any]] = []
+        
+        # ── Proactive Planner (Self-Learning System) ────────────────────
+        # Initialize self-learning components if save_trajectories is enabled
+        self._proactive_planner: Optional[ProactivePlanner] = None
+        self._outcome_evaluator: Optional[OutcomeEvaluator] = None
+        self._trajectory_index: Optional[TrajectoryIndex] = None
+        self._complexity_analyzer: Optional[ComplexityAnalyzer] = None
+        self._planned_actions: List[str] = []  # Actions taken by proactive planner this turn
+        
+        if self.save_trajectories:
+            try:
+                self._trajectory_index = TrajectoryIndex()
+                self._outcome_evaluator = OutcomeEvaluator()
+                self._complexity_analyzer = ComplexityAnalyzer()
+                self._proactive_planner = ProactivePlanner(
+                    complexity_analyzer=self._complexity_analyzer,
+                    pattern_matcher=None,  # Creates its own with the index
+                    enabled=True,
+                    complexity_threshold="medium",
+                    max_subagents=3,
+                    subagent_timeout=120,
+                    min_failures_to_warn=2,
+                )
+                logger.debug("Self-learning system initialized (save_trajectories=True)")
+            except Exception as e:
+                logger.warning("Failed to initialize self-learning system: %s", e)
         
         # Cached system prompt -- built once per session, only rebuilt on compression
         self._cached_system_prompt: Optional[str] = None
@@ -3312,6 +3342,9 @@ class AIAgent:
         if not _soul_loaded:
             # Fallback to hardcoded identity
             prompt_parts = [DEFAULT_AGENT_IDENTITY]
+
+        # Natural human writing guidance — always injected
+        prompt_parts.append(HUMAN_WRITING_GUIDANCE)
 
         # Tool-aware behavioral guidance: only inject when the tools are loaded
         tool_guidance = []
@@ -8253,6 +8286,40 @@ class AIAgent:
         current_turn_user_idx = len(messages) - 1
         self._persist_user_message_idx = current_turn_user_idx
         
+        # ── Proactive Planning (Self-Learning) ────────────────────────────
+        # Run complexity analysis and optionally spawn research subagents
+        # BEFORE the main agent loop starts working on the task.
+        _proactive_context = ""
+        self._planned_actions = []
+        if self._proactive_planner is not None and self._proactive_planner.enabled:
+            try:
+                _plan_result = self._proactive_planner.plan_ahead(
+                    task=user_message,
+                    conversation_history=conversation_history or [],
+                    parent_agent=self,
+                )
+                if _plan_result.injected_context:
+                    _proactive_context = _plan_result.injected_context
+                    # Inject proactive context into the user message
+                    messages[current_turn_user_idx]["content"] = (
+                        user_message
+                        + "\n\n"
+                        + _proactive_context
+                    )
+                if _plan_result.pattern_warnings:
+                    logger.info(
+                        "ProactivePlanner: %d warnings, complexity=%s, spawned=%d",
+                        len(_plan_result.pattern_warnings),
+                        _plan_result.complexity,
+                        len(_plan_result.spawned_subagents),
+                    )
+                self._planned_actions = _plan_result.recommended_actions
+                # Adjust iteration budget if recommended
+                if _plan_result.adjusted_iteration_budget:
+                    self.iteration_budget._max_total = _plan_result.adjusted_iteration_budget
+            except Exception as _pp_err:
+                logger.warning("Proactive planning failed: %s", _pp_err)
+        
         if not self.quiet_mode:
             self._safe_print(f"💬 Starting conversation: '{user_message[:60]}{'...' if len(user_message) > 60 else ''}'")
         
@@ -11080,6 +11147,44 @@ class AIAgent:
 
         # Save trajectory if enabled
         self._save_trajectory(messages, user_message, completed)
+
+        # ── Outcome Evaluation (Self-Learning) ─────────────────────────────
+        # Evaluate task outcome and index to trajectory for future pattern matching
+        if self._outcome_evaluator is not None and self._trajectory_index is not None:
+            try:
+                _report = self._outcome_evaluator.evaluate(
+                    messages=messages,
+                    exit_reason=(
+                        "iteration_exhausted"
+                        if api_call_count >= self.max_iterations
+                        else ("completed" if completed else "error")
+                    ),
+                    planned_actions=self._planned_actions,
+                )
+                # Extract signals for indexing
+                from agent.failure_classifier import FailureClassifier
+                _classifier = FailureClassifier()
+                _usage_stats = {"prompt_tokens": getattr(self.context_compressor, "last_prompt_tokens", 0)}
+                _signals = _classifier.extract_signals(
+                    messages, _report.failure_reason.value if _report.failure_reason else "unknown", _usage_stats
+                )
+                # Index the trajectory
+                self._trajectory_index.index(
+                    signals=_signals,
+                    messages=messages,
+                    failure_reason=_report.failure_reason,
+                    completed=completed,
+                    task_message=original_user_message,
+                )
+                if _report.outcome.value != "success":
+                    logger.info(
+                        "Outcome: %s | reason: %s | corrections: %d",
+                        _report.outcome.value,
+                        _report.failure_reason.value if _report.failure_reason else "none",
+                        _report.correction_count,
+                    )
+            except Exception as _oe_err:
+                logger.warning("Outcome evaluation failed: %s", _oe_err)
 
         # Clean up VM and browser for this task after conversation completes
         self._cleanup_task_resources(effective_task_id)

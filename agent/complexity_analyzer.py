@@ -1,0 +1,367 @@
+"""
+Complexity Analyzer — determines task complexity to decide if proactive planning is needed.
+
+Uses a two-tier approach:
+1. Fast heuristics (no LLM call) — keyword and structural analysis
+2. Lightweight LLM classification (optional) — for ambiguous cases
+
+Usage:
+    analyzer = ComplexityAnalyzer()
+    result = analyzer.analyze(
+        task="refactor the entire auth module across 3 services",
+        conversation_history=history
+    )
+    
+    if result.complexity in ("medium", "high"):
+        planner.spawn_research_subagents(...)
+"""
+
+import enum
+import re
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional
+
+
+class ComplexityLevel(enum.Enum):
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+
+
+@dataclass
+class ComplexityResult:
+    """Result of complexity analysis."""
+    complexity: str               # low|medium|high
+    confidence: float            # 0.0-1.0
+    task_type: str               # refactor|bugfix|migration|etc
+    reasoning: str               # Why this complexity was assigned
+    signals: Dict[str, Any]      # All extracted signals
+    needs_llm_classification: bool = False  # Ambiguous, needs LLM
+    needs_proactive_planning: bool = False  # Should spawn subagents
+
+
+class ComplexityAnalyzer:
+    """
+    Analyzes task complexity using heuristics + optional LLM.
+    
+    Complexity detection triggers:
+    - LOW: simple commands, single file, straightforward task
+    - MEDIUM: multi-file, requires understanding existing code
+    - HIGH: multi-repo, large-scale refactor, architecture work
+    """
+
+    # Strong complexity indicators (any of these → high)
+    HIGH_INDICATORS = {
+        "keywords": [
+            "entire", "whole", "full", "complete", "monolith",
+            "rearchitect", "redesign", "rewrite from scratch",
+            "10+", "dozens", "hundreds of",
+            "multiple repos", "across services", "across microservices",
+            "brownfield", "legacy codebase", "10 year old",
+        ],
+        "task_types": ["architecture", "migration", "large_scale_refactor"],
+    }
+
+    # Moderate complexity indicators (any → medium)
+    MEDIUM_INDICATORS = {
+        "keywords": [
+            "several", "multiple", "module", "service", "two", "three",
+            "across", "integration", "api", "database",
+            "3-5", "5-10",
+            "feature", "complex", "nontrivial",
+        ],
+        "task_types": ["refactor", "new_feature"],
+    }
+
+    # Simple task indicators (implies low complexity)
+    LOW_INDICATORS = {
+        "keywords": [
+            "simple", "quick", "small", "tiny", "one", "single",
+            "just", "easily", "straightforward",
+        ],
+        "task_types": ["simple", "investigation"],
+    }
+
+    # Strong signals for specific complexity
+    STRONG_SIGNALS = {
+        "file_count": {
+            range(10, 1000): "high",
+            range(3, 10): "medium",
+            range(0, 3): "low",
+        },
+    }
+
+    def __init__(self):
+        self._llm_classifier_prompt = """Given this task, classify its complexity for an AI coding agent.
+
+Task: {task}
+
+Classify as one of:
+- LOW: Single file changes, simple fixes, clearly defined scope
+- MEDIUM: Multi-file work, needs understanding existing code, moderate scope
+- HIGH: Large refactors, multi-repo, architecture changes, unclear scope
+
+Respond with ONLY the complexity level, nothing else. Example response: medium
+"""
+
+    def analyze(
+        self,
+        task: str,
+        conversation_history: Optional[List[Dict[str, Any]]] = None,
+        force_llm: bool = False
+    ) -> ComplexityResult:
+        """
+        Analyze task complexity.
+        
+        Args:
+            task: The user's task description
+            conversation_history: Optional prior conversation for context
+            force_llm: Force LLM classification (for testing/debugging)
+            
+        Returns:
+            ComplexityResult with complexity level, confidence, and reasoning
+        """
+        signals = self._extract_signals(task, conversation_history)
+        
+        # Try heuristics first
+        complexity, confidence, reasoning = self._classify_from_signals(signals)
+        
+        # If ambiguous (medium confidence), consider LLM classification
+        needs_llm = (
+            force_llm
+            or (confidence < 0.7 and complexity == "medium")
+            or self._has_ambiguous_signals(signals)
+        )
+        
+        if needs_llm and complexity == "medium":
+            # Could upgrade or stay medium
+            llm_result = self._llm_classify(task)
+            if llm_result:
+                complexity = llm_result
+                confidence = 0.8  # LLM is more reliable
+                reasoning += f" (refined by LLM to {complexity})"
+        
+        needs_proactive = complexity in ("medium", "high")
+        
+        return ComplexityResult(
+            complexity=complexity,
+            confidence=confidence,
+            task_type=signals.get("task_type", "unknown"),
+            reasoning=reasoning,
+            signals=signals,
+            needs_llm_classification=needs_llm,
+            needs_proactive_planning=needs_proactive,
+        )
+
+    def _extract_signals(
+        self,
+        task: str,
+        history: Optional[List[Dict[str, Any]]]
+    ) -> Dict[str, Any]:
+        """Extract all signals from task and conversation history."""
+        signals = {}
+        task_lower = task.lower()
+        
+        # Task type
+        signals["task_type"] = self._classify_task_type(task_lower)
+        
+        # Keyword counts
+        signals["high_keywords"] = self._count_keywords(task_lower, self.HIGH_INDICATORS["keywords"])
+        signals["medium_keywords"] = self._count_keywords(task_lower, self.MEDIUM_INDICATORS["keywords"])
+        signals["low_keywords"] = self._count_keywords(task_lower, self.LOW_INDICATORS["keywords"])
+        
+        # File/directory count hints
+        signals["file_hints"] = self._extract_file_hints(task)
+        
+        # Multi-repo detection
+        signals["multi_repo"] = self._detect_multi_repo(task_lower)
+        
+        # Stack trace / error dump (implies bugfix/investigation)
+        signals["has_stack_trace"] = self._has_stack_trace(task)
+        
+        # Test mention
+        signals["mentions_test"] = "test" in task_lower
+        
+        # Duration hints
+        signals["duration_hints"] = self._extract_duration_hints(task)
+        
+        # Prior context from history
+        if history:
+            signals["has_extensive_history"] = len(history) > 20
+            signals["prior_complex_work"] = self._had_complex_work(history)
+        
+        return signals
+
+    def _classify_task_type(self, text: str) -> str:
+        """Classify the type of task."""
+        type_keywords = {
+            "refactor": ["refactor", "restructure", "reorganize", "clean up", "improve code"],
+            "bugfix": ["bug", "fix", "crash", "error", "broken", "issue", "patch"],
+            "migration": ["migrate", "upgrade", "port", "convert to", "move to"],
+            "new_feature": ["add", "implement", "new", "create", "build", "feature"],
+            "investigation": ["find", "search", "investigate", "debug", "trace", "understand"],
+            "architecture": ["architect", "design pattern", "system design", "structure"],
+            "simple": ["change", "update", "rename", "move", "delete", "remove"],
+        }
+        
+        for task_type, keywords in type_keywords.items():
+            if any(kw in text for kw in keywords):
+                return task_type
+        
+        return "unknown"
+
+    def _count_keywords(self, text: str, keywords: List[str]) -> int:
+        """Count how many keywords appear in text."""
+        return sum(1 for kw in keywords if kw in text)
+
+    def _extract_file_hints(self, task: str) -> int:
+        """Extract file count hints from task description."""
+        # Look for patterns like "5 files", "3 modules", "10+ files"
+        patterns = [
+            r'(\d+)\+?\s*(?:files?|modules?|services?|components?)',
+            r'(?:entire|whole|all)\s+(?:the\s+)?([\w/]+)',
+            r'modules?/([\w/]+)',
+        ]
+        
+        total = 0
+        for pattern in patterns:
+            matches = re.findall(pattern, task.lower())
+            for m in matches:
+                try:
+                    val = int(m)
+                    if 1 <= val <= 100:
+                        total += val
+                except (ValueError, TypeError):
+                    pass
+        
+        return total
+
+    def _detect_multi_repo(self, text: str) -> bool:
+        """Detect if task spans multiple repositories."""
+        indicators = [
+            "frontend/", "backend/", "frontend", "backend",
+            "shared/", "common/", "libs/", "packages/",
+            "micro-frontend", "microservices",
+            "repo", "repository",
+        ]
+        
+        matches = [ind for ind in indicators if ind in text]
+        # Multiple indicators or explicit multi-repo mention
+        return len(matches) >= 2 or "multiple repos" in text
+
+    def _has_stack_trace(self, task: str) -> bool:
+        """Detect if task contains a stack trace (suggests bugfix)."""
+        stack_indicators = ["traceback", "exception", "error:", "at ", "line ", "in "]
+        lines = task.split('\n')
+        if len(lines) > 5:
+            # Looks like a stack trace
+            if sum(1 for line in lines[:10] if any(ind in line for ind in stack_indicators)) >= 3:
+                return True
+        return False
+
+    def _extract_duration_hints(self, task: str) -> Optional[str]:
+        """Extract duration/effort hints from task."""
+        duration_patterns = [
+            (r'(\d+)\s*hours?', 'hours'),
+            (r'(\d+)\s*days?', 'days'),
+            (r'7\s*hours', '7h'),
+            (r'35,?000\s*lines', '35k_lines'),
+        ]
+        
+        for pattern, label in duration_patterns:
+            if re.search(pattern, task.lower()):
+                return label
+        
+        return None
+
+    def _had_complex_work(self, history: List[Dict[str, Any]]) -> bool:
+        """Check if conversation history shows prior complex work."""
+        if len(history) > 30:
+            return True
+        
+        # Check for many tool calls
+        tool_calls = sum(
+            1 for m in history
+            if m.get("role") == "assistant" and m.get("tool_calls")
+        )
+        
+        return tool_calls > 20
+
+    def _has_ambiguous_signals(self, signals: Dict[str, Any]) -> bool:
+        """Check if signals are mixed enough to warrant LLM classification."""
+        high = signals.get("high_keywords", 0)
+        medium = signals.get("medium_keywords", 0)
+        low = signals.get("low_keywords", 0)
+        
+        # Mixed signals: all categories have similar counts
+        total = high + medium + low
+        if total == 0:
+            return True
+        
+        # If the dominant category isn't clear, ambiguous
+        max_count = max(high, medium, low)
+        return max_count / total < 0.6
+
+    def _classify_from_signals(
+        self, signals: Dict[str, Any]
+    ) -> tuple[str, float, str]:
+        """Classify complexity from extracted signals."""
+        high_kw = signals.get("high_keywords", 0)
+        med_kw = signals.get("medium_keywords", 0)
+        low_kw = signals.get("low_keywords", 0)
+        file_hints = signals.get("file_hints", 0)
+        multi_repo = signals.get("multi_repo", False)
+        has_stack = signals.get("has_stack_trace", False)
+        task_type = signals.get("task_type", "unknown")
+        
+        # Strong signals for HIGH
+        if multi_repo:
+            return "high", 0.95, "Multi-repo task detected"
+        
+        if file_hints >= 10:
+            return "high", 0.9, f"File hint suggests {file_hints} files"
+        
+        if high_kw >= 2:
+            return "high", 0.85, f"Multiple high-complexity keywords ({high_kw})"
+        
+        if task_type == "architecture":
+            return "high", 0.9, "Architecture task"
+        
+        # Medium signals
+        if med_kw >= 2 and high_kw == 0:
+            return "medium", 0.7, f"Multiple medium-complexity keywords ({med_kw})"
+        
+        if file_hints >= 3:
+            return "medium", 0.75, f"File hint suggests {file_hints} files"
+        
+        if task_type in ("refactor", "new_feature"):
+            if med_kw >= 1 or file_hints >= 2:
+                return "medium", 0.7, f"{task_type} task with moderate scope"
+        
+        # Strong signals for LOW
+        if low_kw >= 2 and med_kw == 0 and high_kw == 0:
+            return "low", 0.9, "Simple task indicators"
+        
+        if task_type == "simple":
+            return "low", 0.8, "Simple task type"
+        
+        if file_hints <= 1 and med_kw <= 1 and high_kw == 0:
+            return "low", 0.65, "Minimal complexity indicators"
+        
+        # Stack trace usually means bugfix which is often medium
+        if has_stack and task_type == "bugfix":
+            return "medium", 0.6, "Bugfix with stack trace"
+        
+        # Default to medium-low if unclear
+        return "medium", 0.5, "Insufficient signals for clear classification"
+
+    def _llm_classify(self, task: str) -> Optional[str]:
+        """
+        Use LLM for classification (optional, for ambiguous cases).
+        
+        Returns None if LLM classification fails or isn't configured.
+        """
+        # This would make an LLM call. For now, return None
+        # as LLM classification requires provider access.
+        # The caller should implement actual LLM call if needed.
+        return None
