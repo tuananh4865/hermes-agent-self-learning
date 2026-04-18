@@ -1171,11 +1171,19 @@ class AIAgent:
         if self.save_trajectories:
             try:
                 self._trajectory_index = TrajectoryIndex()
-                self._outcome_evaluator = OutcomeEvaluator()
-                self._complexity_analyzer = ComplexityAnalyzer()
+                self._outcome_evaluator = OutcomeEvaluator(
+                    trajectory_index=self._trajectory_index
+                )
+                self._complexity_analyzer = ComplexityAnalyzer(
+                    trajectory_index=self._trajectory_index
+                )
+                from agent.pattern_matcher import PatternMatcher
+                _pattern_matcher = PatternMatcher(
+                    trajectory_index=self._trajectory_index
+                )
                 self._proactive_planner = ProactivePlanner(
                     complexity_analyzer=self._complexity_analyzer,
-                    pattern_matcher=None,  # Creates its own with the index
+                    pattern_matcher=_pattern_matcher,
                     enabled=True,
                     complexity_threshold="medium",
                     max_subagents=3,
@@ -11151,8 +11159,9 @@ class AIAgent:
         self._save_trajectory(messages, user_message, completed)
 
         # ── Outcome Evaluation (Self-Learning) ─────────────────────────────
-        # Evaluate task outcome and index to trajectory for future pattern matching
-        if self._outcome_evaluator is not None and self._trajectory_index is not None:
+        # Evaluate task outcome and index to trajectory for future pattern matching.
+        # OutcomeEvaluator.evaluate() handles indexing internally.
+        if self._outcome_evaluator is not None:
             try:
                 _report = self._outcome_evaluator.evaluate(
                     messages=messages,
@@ -11162,21 +11171,6 @@ class AIAgent:
                         else ("completed" if completed else "error")
                     ),
                     planned_actions=self._planned_actions,
-                )
-                # Extract signals for indexing
-                from agent.failure_classifier import FailureClassifier
-                _classifier = FailureClassifier()
-                _usage_stats = {"prompt_tokens": getattr(self.context_compressor, "last_prompt_tokens", 0)}
-                _signals = _classifier.extract_signals(
-                    messages, _report.failure_reason.value if _report.failure_reason else "unknown", _usage_stats
-                )
-                # Index the trajectory
-                self._trajectory_index.index(
-                    signals=_signals,
-                    messages=messages,
-                    failure_reason=_report.failure_reason,
-                    completed=completed,
-                    task_message=original_user_message,
                 )
                 if _report.outcome.value != "success":
                     logger.info(

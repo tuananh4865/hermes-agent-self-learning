@@ -374,7 +374,7 @@ DEFAULT_CONFIG = {
         "gateway_notify_interval": 600,
         # Save conversation trajectories to JSONL files for self-learning.
         # When enabled, the proactive planner + outcome evaluator activate.
-        "save_trajectories": true,
+        "save_trajectories": True,
     },
     
     "terminal": {
