@@ -123,6 +123,8 @@ class ProactivePlanner:
                 pattern_warnings=[],
                 recommended_actions=[],
                 spawned_subagents=[],
+                adjusted_iteration_budget=None,
+                abort_reason=None,
                 reasoning="Proactive planning disabled"
             )
 
@@ -143,6 +145,8 @@ class ProactivePlanner:
                 pattern_warnings=[],
                 recommended_actions=[],
                 spawned_subagents=[],
+                adjusted_iteration_budget=None,
+                abort_reason=None,
                 reasoning=f"Complexity '{complexity}' below threshold '{self.complexity_threshold}'"
             )
 

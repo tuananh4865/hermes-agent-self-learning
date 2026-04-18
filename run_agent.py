@@ -8316,6 +8316,27 @@ class AIAgent:
                         + "\n\n"
                         + _proactive_context
                     )
+                # ── P2.1: Inject recommended_actions into user message ────────
+                # recommended_actions are already in _plan_result.recommended_actions
+                # Append them as a structured hint block so the model acts on them
+                if _plan_result.recommended_actions:
+                    _action_block = (
+                        "\n\n╔═══════════════════════════════════════════════════════╗\n"
+                        "║  RECOMMENDED ACTIONS (learned from past tasks)        ║\n"
+                        "╠═══════════════════════════════════════════════════════╣\n"
+                    )
+                    for _i, _action in enumerate(_plan_result.recommended_actions[:5], 1):
+                        # Truncate each action to avoid bloating the user message
+                        _action_block += f"║  {_i}. {_action[:55]}"
+                        if len(_action) > 55:
+                            _action_block = _action_block.rstrip() + "...\n"
+                        else:
+                            _action_block += "\n"
+                    _action_block += (
+                        "╚═══════════════════════════════════════════════════════╝\n"
+                    )
+                    messages[current_turn_user_idx]["content"] += _action_block
+
                 if _plan_result.pattern_warnings:
                     logger.info(
                         "ProactivePlanner: %d warnings, complexity=%s, spawned=%d",
@@ -8323,6 +8344,19 @@ class AIAgent:
                         _plan_result.complexity,
                         len(_plan_result.spawned_subagents),
                     )
+                    # ── P2.2: Show pattern warnings to user before task starts ─
+                    # Emit as status so CLI/Gateway can display them prominently
+                    _warn_summary = (
+                        f"⚠️  Self-Learning: Detected {len(_plan_result.pattern_warnings)} "
+                        f"known failure pattern(s) for this task type:\n"
+                    )
+                    for _w in _plan_result.pattern_warnings[:3]:
+                        _warn_summary += f"  • {_w[:80]}\n"
+                    _warn_summary += (
+                        f"  Complexity: {_plan_result.complexity.upper()} | "
+                        f"Research subagents spawned: {len(_plan_result.spawned_subagents)}"
+                    )
+                    self._emit_status(_warn_summary)
                 self._planned_actions = _plan_result.recommended_actions
                 # Adjust iteration budget if recommended
                 if _plan_result.adjusted_iteration_budget:

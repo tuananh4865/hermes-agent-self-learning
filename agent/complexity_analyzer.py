@@ -141,7 +141,18 @@ class ComplexityAnalyzer:
                 self._learned_adjustments[tt] = adjustment
 
     def get_adjustment(self, task_type: str) -> Dict[str, float]:
-        """Get learned adjustments for a task type."""
+        """
+        Get learned adjustments for a task type.
+        
+        Checks trajectory_index first (live DB lookup), then falls back to
+        the in-memory _learned_adjustments populated by learn_from_trajectories().
+        """
+        # Try live DB lookup first
+        if self._trajectory_index is not None:
+            db_adjustment = self._trajectory_index.get_adjustment(task_type)
+            if db_adjustment:
+                return db_adjustment
+        # Fall back to in-memory adjustments
         return self._learned_adjustments.get(task_type, {})
 
     _LLM_CLASSIFIER_PROMPT = """Given this task, classify its complexity for an AI coding agent.
