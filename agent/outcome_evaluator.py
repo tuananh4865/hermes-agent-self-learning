@@ -18,10 +18,14 @@ Usage:
 """
 
 import enum
+import logging
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from agent.failure_classifier import FailureClassifier, FailureReason, TaskSignals
+from agent.trajectory_index import TrajectoryIndex
+
+logger = logging.getLogger(__name__)
 
 
 class Outcome(enum.Enum):
@@ -50,8 +54,9 @@ class OutcomeEvaluator:
         Task completes → evaluate → index → future tasks benefit
     """
 
-    def __init__(self):
+    def __init__(self, trajectory_index: Optional[TrajectoryIndex] = None):
         self.classifier = FailureClassifier()
+        self.index = trajectory_index or TrajectoryIndex()
 
     def evaluate(
         self,
@@ -93,7 +98,19 @@ class OutcomeEvaluator:
         recommendations = self._generate_recommendations(
             outcome, failure_reason, signals
         )
-        
+
+        # ── Close the learning loop: index this trajectory ──
+        try:
+            self.index.index(
+                signals=signals,
+                messages=messages,
+                failure_reason=failure_reason,
+                completed=(outcome == Outcome.SUCCESS),
+            )
+        except Exception as e:
+            logger.warning("Failed to index trajectory: %s", e)
+        # ─────────────────────────────────────────────────────
+
         return OutcomeReport(
             outcome=outcome,
             failure_reason=failure_reason,

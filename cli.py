@@ -1595,6 +1595,7 @@ class HermesCLI:
         resume: str = None,
         checkpoints: bool = False,
         pass_session_id: bool = False,
+        save_trajectories: bool = None,
     ):
         """
         Initialize the Hermes CLI.
@@ -2898,7 +2899,7 @@ class HermesCLI:
                 session_db=self._session_db,
                 clarify_callback=self._clarify_callback,
                 reasoning_callback=self._current_reasoning_callback(),
-
+                save_trajectories=save_trajectories if save_trajectories is not None else CLI_CONFIG.get("agent", {}).get("save_trajectories", False),
                 fallback_model=self._fallback_model,
                 thinking_callback=self._on_thinking,
                 checkpoints_enabled=self.checkpoints_enabled,
@@ -9826,6 +9827,7 @@ def main(
     w: bool = False,
     checkpoints: bool = False,
     pass_session_id: bool = False,
+    save_trajectories: bool = None,
 ):
     """
     Hermes Agent CLI - Interactive AI Assistant
@@ -9935,6 +9937,7 @@ def main(
         resume=resume,
         checkpoints=checkpoints,
         pass_session_id=pass_session_id,
+        save_trajectories=save_trajectories,
     )
 
     if parsed_skills:

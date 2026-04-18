@@ -599,6 +599,7 @@ class AIAgent:
         interim_assistant_callback: callable = None,
         tool_gen_callback: callable = None,
         status_callback: callable = None,
+        feedback_callback: callable = None,
         max_tokens: int = None,
         reasoning_config: Dict[str, Any] = None,
         service_tier: str = None,
@@ -768,6 +769,7 @@ class AIAgent:
         self.stream_delta_callback = stream_delta_callback
         self.interim_assistant_callback = interim_assistant_callback
         self.status_callback = status_callback
+        self.feedback_callback = feedback_callback
         self.tool_gen_callback = tool_gen_callback
 
         
@@ -11185,6 +11187,23 @@ class AIAgent:
                     )
             except Exception as _oe_err:
                 logger.warning("Outcome evaluation failed: %s", _oe_err)
+
+        # ── User Feedback Loop ──────────────────────────────────────────────
+        # Ask user: "Did the task succeed?" — feeds outcome back into trajectory for learning
+        # Only triggers when: (1) save_trajectories=True, (2) feedback_callback is set
+        if self.feedback_callback and self.save_trajectories and self._trajectory_index is not None:
+            try:
+                _task_preview = (original_user_message[:80] + "..."
+                    if len(original_user_message) > 80 else original_user_message)
+                _msg_for_callback = (
+                    f"Task completed. Do you confirm the result is correct?\n"
+                    f"Task: {_task_preview}\n"
+                    f"Reply: yes/no/partially"
+                )
+                # Emit as status so CLI can intercept and route to clarify_callback
+                self._emit_status(_msg_for_callback)
+            except Exception as _fb_err:
+                logger.debug("Feedback callback skipped: %s", _fb_err)
 
         # Clean up VM and browser for this task after conversation completes
         self._cleanup_task_resources(effective_task_id)

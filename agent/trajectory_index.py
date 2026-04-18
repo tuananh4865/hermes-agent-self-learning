@@ -115,6 +115,27 @@ class TrajectoryIndex:
         self.hermes_home = Path(hermes_home)
         self.db_path = self.hermes_home / "trajectory_index.db"
         self._ensure_db()
+        
+        # Auto-cleanup: run once per day (threshold stored alongside DB)
+        self._cleanup_flag_path = self.hermes_home / ".trajectory_cleanup_flag"
+        self._maybe_cleanup()
+
+    def _maybe_cleanup(self):
+        """Run cleanup once per day based on flag file timestamp."""
+        try:
+            if self._cleanup_flag_path.exists():
+                import time
+                age_hours = (time.time() - self._cleanup_flag_path.stat().st_mtime) / 3600
+                if age_hours < 24:
+                    return  # Already ran today
+            
+            self.cleanup_old_trajectories(retention_days=30)
+            
+            # Touch flag file
+            self._cleanup_flag_path.parent.mkdir(parents=True, exist_ok=True)
+            self._cleanup_flag_path.touch()
+        except Exception as e:
+            logger.debug("Cleanup skipped: %s", e)
 
     # ─── Initialization ─────────────────────────────────────────────────
 
@@ -161,6 +182,43 @@ class TrajectoryIndex:
             except sqlite3.Error:
                 pass
         
+        # Create FTS5 virtual table for full-text similarity search
+        try:
+            cursor.execute("""
+                CREATE VIRTUAL TABLE IF NOT EXISTS trajectories_fts USING fts5(
+                    task_message,
+                    content='trajectories',
+                    content_rowid='id',
+                    tokenize='porter unicode61'
+                )
+            """)
+            # Populate FTS index if empty (first run)
+            cursor.execute("SELECT COUNT(*) FROM trajectories_fts")
+            if cursor.fetchone()[0] == 0:
+                cursor.execute("""
+                    INSERT INTO trajectories_fts(rowid, task_message)
+                    SELECT id, task_message FROM trajectories WHERE task_message IS NOT NULL
+                """)
+            # Triggers to keep FTS in sync
+            cursor.execute("""
+                CREATE TRIGGER IF NOT EXISTS trajectories_ai AFTER INSERT ON trajectories BEGIN
+                    INSERT INTO trajectories_fts(rowid, task_message) VALUES (new.id, new.task_message);
+                END
+            """)
+            cursor.execute("""
+                CREATE TRIGGER IF NOT EXISTS trajectories_ad AFTER DELETE ON trajectories BEGIN
+                    INSERT INTO trajectories_fts(trajectories_fts, rowid, task_message) VALUES('delete', old.id, old.task_message);
+                END
+            """)
+            cursor.execute("""
+                CREATE TRIGGER IF NOT EXISTS trajectories_au AFTER UPDATE ON trajectories BEGIN
+                    INSERT INTO trajectories_fts(trajectories_fts, rowid, task_message) VALUES('delete', old.id, old.task_message);
+                    INSERT INTO trajectories_fts(rowid, task_message) VALUES (new.id, new.task_message);
+                END
+            """)
+        except sqlite3.Error:
+            pass
+
         conn.commit()
         conn.close()
 
@@ -249,51 +307,70 @@ class TrajectoryIndex:
         include_failed_only: bool = False
     ) -> List[TrajectoryMatch]:
         """
-        Find similar past tasks using keyword overlap.
+        Find similar past tasks using FTS5 full-text search + keyword scoring hybrid.
         
-        Simple TF-IDF-like scoring: count shared significant words.
+        FTS5 BM25 ranking finds candidates, then keyword overlap re-ranks.
         """
         query_words = self._extract_significant_words(task_message)
-        if not query_words:
+        if not query_words and not task_message.strip():
             return []
         
         conn = self._get_connection()
         cursor = conn.cursor()
         
-        # Build query with optional filters
+        # Build optional filters
         conditions = []
         params = []
         
         if task_type:
-            conditions.append("task_type = ?")
+            conditions.append("t.task_type = ?")
             params.append(task_type)
-        
         if complexity:
-            conditions.append("complexity = ?")
+            conditions.append("t.complexity = ?")
             params.append(complexity)
-        
         if include_failed_only:
-            conditions.append("completed = 0")
-        
+            conditions.append("t.completed = 0")
         where_clause = " AND ".join(conditions) if conditions else "1=1"
         
-        cursor.execute(f"""
-            SELECT 
-                id, task_hash, task_message, task_type, complexity,
-                failure_reason, completed, correction_count,
-                tool_call_count, context_util_final, created_at
-            FROM trajectories
-            WHERE {where_clause}
-            ORDER BY created_at DESC
-            LIMIT 200
-        """, params)
+        # Try FTS5 MATCH first; fall back to plain keyword scan if FTS unavailable
+        fts_results = None
+        try:
+            # BM25 search on FTS5
+            fts_query = " OR ".join(f'"{w}"' for w in query_words if w)
+            if fts_query:
+                cursor.execute(f"""
+                    SELECT t.id, t.task_hash, t.task_message, t.task_type, t.complexity,
+                           t.failure_reason, t.completed, t.correction_count,
+                           t.tool_call_count, t.context_util_final, t.created_at,
+                           bm25(trajectories_fts) as rank
+                    FROM trajectories_fts fts
+                    JOIN trajectories t ON t.id = fts.rowid
+                    WHERE trajectories_fts MATCH ? AND {where_clause}
+                    ORDER BY rank
+                    LIMIT 200
+                """, (fts_query,) + tuple(params))
+                fts_results = cursor.fetchall()
+        except sqlite3.Error:
+            fts_results = None
         
-        rows = cursor.fetchall()
+        # If FTS had no results, fall back to full table scan with keyword scoring
+        if not fts_results:
+            cursor.execute(f"""
+                SELECT id, task_hash, task_message, task_type, complexity,
+                       failure_reason, completed, correction_count,
+                       tool_call_count, context_util_final, created_at
+                FROM trajectories t
+                WHERE {where_clause}
+                ORDER BY created_at DESC
+                LIMIT 200
+            """, params)
+            fts_results = cursor.fetchall()
+        
         conn.close()
         
-        # Score by word overlap
+        # Score and rank by keyword overlap
         scored = []
-        for row in rows:
+        for row in fts_results:
             match = TrajectoryMatch(
                 id=row[0],
                 task_hash=row[1],
@@ -308,16 +385,15 @@ class TrajectoryIndex:
                 created_at=row[10],
             )
             
-            # Compute similarity score
+            # Keyword overlap score (Jaccard)
             match_words = self._extract_significant_words(row[2])
             overlap = len(query_words & match_words)
             union = len(query_words | match_words)
             match.similarity_score = overlap / union if union > 0 else 0.0
             
-            if match.similarity_score > 0.1:  # Minimum threshold
+            if match.similarity_score > 0.05:  # Lowered threshold since FTS pre-filtered
                 scored.append(match)
         
-        # Sort by similarity and return top N
         scored.sort(key=lambda m: m.similarity_score, reverse=True)
         return scored[:limit]
 
@@ -483,6 +559,66 @@ class TrajectoryIndex:
         logger.info("Pruned %d old trajectory entries", deleted)
         return deleted
 
+    def get_adjustment(
+        self,
+        task_type: str,
+        max_age_days: int = 30
+    ) -> Optional[Dict[str, float]]:
+        """
+        Get complexity adjustment for a task type based on historical failure rates.
+
+        Analyzes past trajectories for this task_type to determine if it
+        historically has higher failure rates, suggesting we should upgrade
+        complexity classification.
+
+        Returns:
+            Dict with 'high_kw_boost' (float) if historical failures found, else None.
+            A high_kw_boost of 1.0 means: treat this as having 1 extra high keyword.
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        cutoff = (datetime.now() - timedelta(days=max_age_days)).isoformat()
+
+        cursor.execute("""
+            SELECT
+                COUNT(*) as total,
+                SUM(CASE WHEN completed = 0 THEN 1 ELSE 0 END) as failed,
+                SUM(CASE WHEN complexity = 'high' THEN 1 ELSE 0 END) as high_count,
+                SUM(CASE WHEN complexity = 'medium' THEN 1 ELSE 0 END) as med_count
+            FROM trajectories
+            WHERE task_type = ? AND created_at > ?
+        """, (task_type, cutoff))
+
+        row = cursor.fetchone()
+        conn.close()
+
+        if not row or row[0] == 0:
+            return None  # No history for this task type
+
+        total = row[0]
+        failed = row[1] or 0
+        high_count = row[2] or 0
+        med_count = row[3] or 0
+
+        # If most tasks of this type fail AND they're not already marked high complexity,
+        # we should boost the effective complexity for future tasks
+        if total >= 3:  # Need at least 3 samples
+            failure_rate = failed / total
+
+            # If failure rate > 50% and mostly medium complexity, boost
+            if failure_rate > 0.5 and med_count > high_count:
+                # Compute boost: how many extra "high keywords" to add
+                # More failures + more medium tasks = bigger boost
+                boost = min(2.0, (failure_rate - 0.5) * 4 + 0.5)
+                return {"high_kw_boost": boost}
+
+            # If very high failure rate even for high complexity tasks, moderate boost
+            if failure_rate > 0.7 and high_count > 0:
+                return {"high_kw_boost": 0.5}
+
+        return None
+
     # ─── Utility methods ───────────────────────────────────────────────
 
     @staticmethod
@@ -518,3 +654,43 @@ class TrajectoryIndex:
         
         words = re.findall(r'\b[a-z]{3,}\b', text.lower())
         return {w for w in words if w not in stopwords}
+
+    def cleanup_old_trajectories(self, retention_days: int = 30) -> int:
+        """
+        Delete trajectories older than retention_days.
+        
+        Called automatically on init (once per day threshold) to keep the
+        database lean. Returns the number of deleted rows.
+        
+        Also purges orphaned FTS entries.
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        
+        cutoff = (datetime.now() - timedelta(days=retention_days)).isoformat()
+        
+        try:
+            # Count before deleting (for logging)
+            cursor.execute(
+                "SELECT COUNT(*) FROM trajectories WHERE created_at < ?",
+                (cutoff,)
+            )
+            count = cursor.fetchone()[0]
+            
+            if count > 0:
+                # Delete from FTS first (via trigger), then from trajectories
+                cursor.execute(
+                    "DELETE FROM trajectories WHERE created_at < ?",
+                    (cutoff,)
+                )
+                conn.commit()
+                logger.info(
+                    "Cleaned up %d trajectories older than %d days", count, retention_days
+                )
+            return count
+            
+        except sqlite3.Error as e:
+            logger.error("Failed to cleanup old trajectories: %s", e)
+            return 0
+        finally:
+            conn.close()

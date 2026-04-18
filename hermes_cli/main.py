@@ -772,6 +772,7 @@ def cmd_chat(args):
         "checkpoints": getattr(args, "checkpoints", False),
         "pass_session_id": getattr(args, "pass_session_id", False),
         "max_turns": getattr(args, "max_turns", None),
+        "save_trajectories": getattr(args, "save_trajectories", None),
     }
     # Filter out None values
     kwargs = {k: v for k, v in kwargs.items() if v is not None}
@@ -4924,6 +4925,13 @@ For more help on a command:
         "--source",
         default=None,
         help="Session source tag for filtering (default: cli). Use 'tool' for third-party integrations that should not appear in user session lists."
+    )
+    chat_parser.add_argument(
+        "--save-trajectories",
+        action="store_true",
+        default=None,
+        dest="save_trajectories",
+        help="Save conversation trajectories for self-learning (default: true in config, use --no-save-trajectories to disable)"
     )
     chat_parser.set_defaults(func=cmd_chat)
 

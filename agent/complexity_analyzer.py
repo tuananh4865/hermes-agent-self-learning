@@ -42,12 +42,14 @@ class ComplexityResult:
 
 class ComplexityAnalyzer:
     """
-    Analyzes task complexity using heuristics + optional LLM.
+    Analyzes task complexity using heuristics + optional LLM + trajectory learning.
     
     Complexity detection triggers:
     - LOW: simple commands, single file, straightforward task
     - MEDIUM: multi-file, requires understanding existing code
     - HIGH: multi-repo, large-scale refactor, architecture work
+    
+    Learning: Adjusts keyword weights based on past trajectory outcomes.
     """
 
     # Strong complexity indicators (any of these → high)
@@ -91,8 +93,58 @@ class ComplexityAnalyzer:
         },
     }
 
-    def __init__(self):
-        self._llm_classifier_prompt = """Given this task, classify its complexity for an AI coding agent.
+    def __init__(self, trajectory_index=None):
+        """
+        Args:
+            trajectory_index: Optional TrajectoryIndex for learning from history.
+                              If None, analyzer works in stateless mode.
+        """
+        self._trajectory_index = trajectory_index
+        # Learned adjustments from past trajectories: {task_type: {"high_kw_boost": 0.1, ...}}
+        self._learned_adjustments: Dict[str, Dict[str, float]] = {}
+
+    def learn_from_trajectories(self, trajectories: list) -> None:
+        """
+        Update keyword weights based on past trajectory outcomes.
+        
+        If a task_type + keyword combo led to failures/high corrections,
+        boost the weight of that keyword for future classifications.
+        """
+        if not trajectories:
+            return
+        
+        # Group by task_type and compute avg correction count
+        task_type_stats: Dict[str, Dict[str, float]] = {}
+        for t in trajectories:
+            tt = getattr(t, "task_type", None) or "unknown"
+            if tt not in task_type_stats:
+                task_type_stats[tt] = {"corrections": [], "failures": 0, "count": 0}
+            task_type_stats[tt]["corrections"].append(getattr(t, "correction_count", 0) or 0)
+            if not getattr(t, "completed", True):
+                task_type_stats[tt]["failures"] += 1
+            task_type_stats[tt]["count"] += 1
+        
+        # Compute adjustments: if a task_type has high avg corrections or high failure rate,
+        # it needs more careful complexity detection (bump up thresholds)
+        for tt, stats in task_type_stats.items():
+            avg_corrections = sum(stats["corrections"]) / len(stats["corrections"]) if stats["corrections"] else 0
+            failure_rate = stats["failures"] / stats["count"] if stats["count"] > 0 else 0
+            
+            # If avg corrections > 3 or failure rate > 40%, this task_type is harder than expected
+            adjustment: Dict[str, float] = {}
+            if avg_corrections > 3:
+                adjustment["high_kw_boost"] = min(0.3, avg_corrections * 0.05)
+            if failure_rate > 0.4:
+                adjustment["failure_boost"] = 0.15
+            
+            if adjustment:
+                self._learned_adjustments[tt] = adjustment
+
+    def get_adjustment(self, task_type: str) -> Dict[str, float]:
+        """Get learned adjustments for a task type."""
+        return self._learned_adjustments.get(task_type, {})
+
+    _LLM_CLASSIFIER_PROMPT = """Given this task, classify its complexity for an AI coding agent.
 
 Task: {task}
 
@@ -122,6 +174,18 @@ Respond with ONLY the complexity level, nothing else. Example response: medium
             ComplexityResult with complexity level, confidence, and reasoning
         """
         signals = self._extract_signals(task, conversation_history)
+        task_type = signals.get("task_type", "unknown")
+        
+        # Apply learned adjustments from past trajectories
+        adjustment = self.get_adjustment(task_type)
+        if adjustment:
+            # Boost high keyword count if this task_type historically had failures
+            high_kw_boost = adjustment.get("high_kw_boost", 0.0)
+            if high_kw_boost > 0 and signals.get("high_keywords", 0) == 0:
+                # If there are ANY medium keywords AND this task_type is historically hard,
+                # treat it as one high keyword
+                if signals.get("medium_keywords", 0) >= 1:
+                    signals["_effective_high_kw"] = high_kw_boost
         
         # Try heuristics first
         complexity, confidence, reasoning = self._classify_from_signals(signals)
@@ -307,6 +371,8 @@ Respond with ONLY the complexity level, nothing else. Example response: medium
     ) -> tuple[str, float, str]:
         """Classify complexity from extracted signals."""
         high_kw = signals.get("high_keywords", 0)
+        # Include learned boost from trajectory history
+        effective_high_kw = high_kw + int(signals.get("_effective_high_kw", 0))
         med_kw = signals.get("medium_keywords", 0)
         low_kw = signals.get("low_keywords", 0)
         file_hints = signals.get("file_hints", 0)
@@ -321,8 +387,8 @@ Respond with ONLY the complexity level, nothing else. Example response: medium
         if file_hints >= 10:
             return "high", 0.9, f"File hint suggests {file_hints} files"
         
-        if high_kw >= 2:
-            return "high", 0.85, f"Multiple high-complexity keywords ({high_kw})"
+        if effective_high_kw >= 2:
+            return "high", 0.85, f"Multiple high-complexity keywords ({effective_high_kw}, including learned)"
         
         if task_type == "architecture":
             return "high", 0.9, "Architecture task"
@@ -337,6 +403,10 @@ Respond with ONLY the complexity level, nothing else. Example response: medium
         if task_type in ("refactor", "new_feature"):
             if med_kw >= 1 or file_hints >= 2:
                 return "medium", 0.7, f"{task_type} task with moderate scope"
+        
+        # Learned boost: if task_type historically had failures, upgrade medium→high
+        if effective_high_kw > high_kw and med_kw >= 1:
+            return "medium", 0.65, f"Upgraded from medium due to learned history for {task_type}"
         
         # Strong signals for LOW
         if low_kw >= 2 and med_kw == 0 and high_kw == 0:
