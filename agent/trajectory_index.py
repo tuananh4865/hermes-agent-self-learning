@@ -516,6 +516,85 @@ class TrajectoryIndex:
             for row in rows
         ]
 
+    def get_recent_lessons(self, n: int = 5, max_age_days: int = 14) -> List[Dict[str, Any]]:
+        """
+        Get the N most recent notable lessons (failures + successes).
+
+        A "notable" entry is one with corrections > 0 (required iteration)
+        or a failure. Ordered by recency.
+
+        Returns a list of dicts with keys: task_type, complexity, failure_reason,
+        completed, correction_count, created_at, lesson_type ("failure" | "success").
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        cutoff = (datetime.now() - timedelta(days=max_age_days)).isoformat()
+        cursor.execute(f"""
+            SELECT
+                task_type, complexity, failure_reason, completed,
+                correction_count, created_at
+            FROM trajectories
+            WHERE created_at > ?
+              AND (correction_count > 0 OR completed = 0)
+            ORDER BY created_at DESC
+            LIMIT ?
+        """, (cutoff, n))
+
+        rows = cursor.fetchall()
+        conn.close()
+
+        lessons = []
+        for row in rows:
+            lessons.append({
+                "task_type": row[0] or "unknown",
+                "complexity": row[1] or "low",
+                "failure_reason": row[2] or (None if row[3] else "unknown"),
+                "completed": bool(row[3]),
+                "correction_count": row[4] or 0,
+                "created_at": row[5],
+                "lesson_type": "success" if row[3] else "failure",
+            })
+        return lessons
+
+    def format_lessons_for_user(self, lessons: List[Dict[str, Any]]) -> str:
+        """
+        Format a list of lessons into a human-readable string for display.
+        Returns empty string if lessons is empty.
+        """
+        if not lessons:
+            return ""
+
+        lines = ["**Recent lessons:**"]
+        for i, lesson in enumerate(lessons, 1):
+            tt = lesson["task_type"]
+            corrections = lesson["correction_count"]
+            reason = lesson["failure_reason"]
+            age_days = self._age_days(lesson["created_at"])
+
+            if lesson["lesson_type"] == "failure":
+                reason_str = f" ({reason})" if reason else ""
+                lines.append(
+                    f"{i}. [{tt}] failed{reason_str} — "
+                    f"{corrections} correction(s), {age_days}d ago"
+                )
+            else:
+                lines.append(
+                    f"{i}. [{tt}] succeeded after {corrections} correction(s), {age_days}d ago"
+                )
+        return "\n".join(lines)
+
+    def _age_days(self, created_at: str) -> str:
+        """Return human-readable age string from ISO timestamp."""
+        try:
+            dt = datetime.fromisoformat(created_at)
+            delta = datetime.now() - dt
+            if delta.days == 0:
+                return "<1"
+            return str(delta.days)
+        except Exception:
+            return "?"
+
     def get_stats(self) -> Dict[str, Any]:
         """Get overall trajectory statistics."""
         conn = self._get_connection()

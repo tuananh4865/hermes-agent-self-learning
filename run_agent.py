@@ -11229,6 +11229,20 @@ class AIAgent:
             except Exception as _oe_err:
                 logger.warning("Outcome evaluation failed: %s", _oe_err)
 
+        # ── User-Facing Lesson Feedback (Self-Learning P3.2) ─────────────────
+        # After outcome evaluation, surface recent lessons to the user so they
+        # know what the system has learned.  Only shown when there are notable
+        # lessons (corrections > 0 or failures).
+        if self._trajectory_index is not None and self._emit_status:
+            try:
+                _lessons = self._trajectory_index.get_recent_lessons(n=3)
+                if _lessons:
+                    _formatted = self._trajectory_index.format_lessons_for_user(_lessons)
+                    if _formatted:
+                        self._emit_status(_formatted)
+            except Exception as _lf_err:
+                logger.debug("Lesson feedback skipped: %s", _lf_err)
+
         # ── User Feedback Loop ──────────────────────────────────────────────
         # Ask user: "Did the task succeed?" — feeds outcome back into trajectory for learning
         # Only triggers when: (1) save_trajectories=True, (2) feedback_callback is set

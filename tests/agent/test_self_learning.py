@@ -582,3 +582,120 @@ class TestConfigDrivenComplexityWeights:
         assert ca._high_keywords == list(ca.HIGH_INDICATORS["keywords"])
         assert ca._medium_keywords == list(ca.MEDIUM_INDICATORS["keywords"])
         assert ca._low_keywords == list(ca.LOW_INDICATORS["keywords"])
+
+
+class TestUserFacingLessons:
+    """Tests for P3.2: user-facing lesson feedback."""
+
+    @pytest.fixture
+    def idx_with_data(self, tmp_path):
+        """TrajectoryIndex with 2 lessons: 1 failure, 1 success with corrections."""
+        idx = TrajectoryIndex(hermes_home=str(tmp_path))
+        from agent.failure_classifier import TaskSignals, FailureReason
+
+        # Entry 1: failure
+        sig1 = TaskSignals()
+        sig1.task_type = "bugfix"
+        sig1.complexity = "high"
+        sig1.files_affected = 3
+        sig1.multi_repo = False
+        sig1.has_tests = False
+        sig1.tool_call_count = 12
+        sig1.error_density = 0.5
+        sig1.correction_count = 2
+        sig1.iteration_count = 8
+        sig1.exit_reason = "iteration_exhausted"
+        sig1.context_util_final = 0.6
+
+        idx.index(
+            signals=sig1,
+            messages=[{"role": "user", "content": "Debug the login bug"}],
+            failure_reason=FailureReason.TOOL_ERROR_STORM,
+            completed=False,
+        )
+
+        # Entry 2: success with corrections
+        sig2 = TaskSignals()
+        sig2.task_type = "refactor"
+        sig2.complexity = "medium"
+        sig2.files_affected = 2
+        sig2.multi_repo = False
+        sig2.has_tests = True
+        sig2.tool_call_count = 6
+        sig2.error_density = 0.1
+        sig2.correction_count = 1
+        sig2.iteration_count = 4
+        sig2.exit_reason = "completed"
+        sig2.context_util_final = 0.5
+
+        idx.index(
+            signals=sig2,
+            messages=[{"role": "user", "content": "Refactor the auth module"}],
+            failure_reason=None,
+            completed=True,
+        )
+
+        yield idx
+        try:
+            idx._conn.close()
+        except Exception:
+            pass
+
+    def test_get_recent_lessons_returns_both_failure_and_success(self, idx_with_data):
+        """Lessons include both failures and successes with corrections."""
+        lessons = idx_with_data.get_recent_lessons(n=5)
+        assert len(lessons) == 2
+        types = {l["task_type"] for l in lessons}
+        assert types == {"bugfix", "refactor"}
+
+    def test_get_recent_lessons_excludes_trivial_successes(self, idx_with_data):
+        """Entries with 0 corrections and completed=True are excluded."""
+        from agent.failure_classifier import TaskSignals
+        # Add trivial success
+        sig = TaskSignals()
+        sig.task_type = "simple"
+        sig.complexity = "low"
+        sig.files_affected = 1
+        sig.multi_repo = False
+        sig.has_tests = False
+        sig.tool_call_count = 2
+        sig.error_density = 0.0
+        sig.correction_count = 0
+        sig.iteration_count = 1
+        sig.exit_reason = "completed"
+        sig.context_util_final = 0.3
+
+        idx_with_data.index(
+            signals=sig,
+            messages=[{"role": "user", "content": "Rename a variable"}],
+            failure_reason=None,
+            completed=True,
+        )
+
+        lessons = idx_with_data.get_recent_lessons(n=5)
+        # Should still be 2 (trivial one excluded)
+        assert len(lessons) == 2
+        types = {l["task_type"] for l in lessons}
+        assert "simple" not in types
+
+    def test_format_lessons_for_user_contains_failure_info(self, idx_with_data):
+        """Formatted output contains failure reason."""
+        lessons = idx_with_data.get_recent_lessons(n=5)
+        formatted = idx_with_data.format_lessons_for_user(lessons)
+        assert "**Recent lessons:**" in formatted
+        assert "bugfix" in formatted
+        assert "failed" in formatted
+        assert "tool_error_storm" in formatted
+
+    def test_format_lessons_for_user_empty_returns_empty_string(self, idx_with_data):
+        """Empty lessons list returns empty string."""
+        formatted = idx_with_data.format_lessons_for_user([])
+        assert formatted == ""
+
+    def test_age_days_helper(self, idx_with_data):
+        """_age_days returns '<1' for recent entries."""
+        from datetime import datetime
+        lesson = idx_with_data.get_recent_lessons(n=1)[0]
+        age = idx_with_data._age_days(lesson["created_at"])
+        # Recent entry should be <1 day
+        assert age == "<1"
