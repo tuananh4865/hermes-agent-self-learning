@@ -1175,7 +1175,8 @@ class AIAgent:
                     trajectory_index=self._trajectory_index
                 )
                 self._complexity_analyzer = ComplexityAnalyzer(
-                    trajectory_index=self._trajectory_index
+                    trajectory_index=self._trajectory_index,
+                    config_weights=None,  # populated below after config load
                 )
                 from agent.pattern_matcher import PatternMatcher
                 _pattern_matcher = PatternMatcher(
@@ -1190,6 +1191,18 @@ class AIAgent:
                     subagent_timeout=120,
                     min_failures_to_warn=2,
                 )
+                # Apply config-driven complexity keyword overrides
+                try:
+                    from hermes_cli.config import load_config as _load_sl_cfg
+                    _sl_cfg = _load_sl_cfg().get("self_learning", {})
+                    _weights = _sl_cfg.get("complexity_weights", {})
+                    if any(_weights.values()):
+                        self._complexity_analyzer._high_keywords.extend(_weights.get("high", []))
+                        self._complexity_analyzer._medium_keywords.extend(_weights.get("medium", []))
+                        self._complexity_analyzer._low_keywords.extend(_weights.get("low", []))
+                        logger.debug("Self-learning complexity weights applied from config")
+                except Exception as e:
+                    logger.warning("Could not load self_learning config: %s", e)
                 logger.debug("Self-learning system initialized (save_trajectories=True)")
             except Exception as e:
                 logger.warning("Failed to initialize self-learning system: %s", e)

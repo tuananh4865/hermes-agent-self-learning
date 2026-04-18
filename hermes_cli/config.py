@@ -376,6 +376,22 @@ DEFAULT_CONFIG = {
         # When enabled, the proactive planner + outcome evaluator activate.
         "save_trajectories": True,
     },
+
+    # Self-learning system — adjusts complexity detection based on trajectory history.
+    # Only active when agent.save_trajectories is True.
+    "self_learning": {
+        # Override keyword lists for complexity classification.
+        # Each entry is a list of keywords. Empty lists = use defaults.
+        # To add custom high-complexity keywords: {"high": ["kubernetes", "terraform", ...]}
+        "complexity_weights": {
+            "high": [],
+            "medium": [],
+            "low": [],
+        },
+        # Threshold (0.0–1.0) above which task_type task_type_weights apply.
+        # Defaults to 0.4 (40% failure rate or avg_corrections > 3).
+        "task_type_weight_threshold": 0.4,
+    },
     
     "terminal": {
         "backend": "local",
@@ -771,7 +787,7 @@ DEFAULT_CONFIG = {
     },
 
     # Config schema version - bump this when adding new required fields
-    "_config_version": 18,
+    "_config_version": 19,
 }
 
 # =============================================================================
@@ -1876,6 +1892,7 @@ _KNOWN_ROOT_KEYS = {
     "_config_version", "model", "providers", "fallback_model",
     "fallback_providers", "credential_pool_strategies", "toolsets",
     "agent", "terminal", "display", "compression", "delegation",
+    "self_learning",
     "auxiliary", "custom_providers", "context", "memory", "gateway",
 }
 

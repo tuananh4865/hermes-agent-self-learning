@@ -530,3 +530,55 @@ class TestSelfLearningLoop:
         )
         # Just verify no crash
         assert patterns is not None
+
+
+# ============================================================================
+# Config-driven complexity weights (P3.1)
+# ============================================================================
+
+class TestConfigDrivenComplexityWeights:
+    """Tests for P3.1: config-driven complexity keyword overrides."""
+
+    def test_default_keywords_used_when_no_config(self):
+        """Without config overrides, built-in keywords are used."""
+        ca = ComplexityAnalyzer()
+        assert "entire" in ca._high_keywords
+        assert "multiple" in ca._medium_keywords
+        assert "simple" in ca._low_keywords
+
+    def test_config_overrides_append_not_replace(self):
+        """Config keywords are appended to defaults, not replacing them."""
+        ca = ComplexityAnalyzer(config_weights={
+            "high": ["kubernetes", "terraform"],
+            "medium": ["docker-compose"],
+            "low": [],
+        })
+        # Built-in keywords still present
+        assert "entire" in ca._high_keywords
+        assert "multiple" in ca._medium_keywords
+        # Custom keywords added
+        assert "kubernetes" in ca._high_keywords
+        assert "terraform" in ca._high_keywords
+        assert "docker-compose" in ca._medium_keywords
+
+    def test_custom_high_keyword_upgrades_classification(self):
+        """A custom high-complexity keyword upgrades a task to HIGH."""
+        # "terraform" is not a built-in high keyword.
+        # Task with no built-in HIGH keywords — only custom.
+        # 2 custom keywords → effective_high_kw=2 → HIGH.
+        ca = ComplexityAnalyzer(config_weights={
+            "high": ["terraform", "kubernetes"],
+        })
+        result = ca.analyze("Deploy terraform modules and configure kubernetes clusters")
+        assert result.complexity == "high"
+        assert result.confidence == 0.85
+        # Built-in HIGH still works (2 built-in keywords: "entire" + "from scratch")
+        result2 = ca.analyze("Rewrite the entire monolith from scratch")
+        assert result2.complexity == "high"
+
+    def test_empty_config_weights_no_change(self):
+        """Empty lists in config_weights leave defaults unchanged."""
+        ca = ComplexityAnalyzer(config_weights={"high": [], "medium": [], "low": []})
+        assert ca._high_keywords == list(ca.HIGH_INDICATORS["keywords"])
+        assert ca._medium_keywords == list(ca.MEDIUM_INDICATORS["keywords"])
+        assert ca._low_keywords == list(ca.LOW_INDICATORS["keywords"])

@@ -93,15 +93,32 @@ class ComplexityAnalyzer:
         },
     }
 
-    def __init__(self, trajectory_index=None):
+    def __init__(self, trajectory_index=None, config_weights: Dict[str, List[str]] = None):
         """
         Args:
             trajectory_index: Optional TrajectoryIndex for learning from history.
                               If None, analyzer works in stateless mode.
+            config_weights: Optional dict of keyword lists from config to override
+                          defaults. Format: {"high": [...], "medium": [...], "low": [...]}.
+                          Empty lists or missing keys = use built-in defaults.
         """
         self._trajectory_index = trajectory_index
         # Learned adjustments from past trajectories: {task_type: {"high_kw_boost": 0.1, ...}}
         self._learned_adjustments: Dict[str, Dict[str, float]] = {}
+
+        # Build effective keyword lists: merge config overrides with defaults.
+        # Config overrides APPEND to defaults (they don't replace).
+        self._keyword_overrides = config_weights or {}
+        self._high_keywords = list(self.HIGH_INDICATORS["keywords"])
+        self._medium_keywords = list(self.MEDIUM_INDICATORS["keywords"])
+        self._low_keywords = list(self.LOW_INDICATORS["keywords"])
+        for cat, kw_list in self._keyword_overrides.items():
+            if cat == "high" and kw_list:
+                self._high_keywords.extend(kw_list)
+            elif cat == "medium" and kw_list:
+                self._medium_keywords.extend(kw_list)
+            elif cat == "low" and kw_list:
+                self._low_keywords.extend(kw_list)
 
     def learn_from_trajectories(self, trajectories: list) -> None:
         """
@@ -241,9 +258,9 @@ Respond with ONLY the complexity level, nothing else. Example response: medium
         signals["task_type"] = self._classify_task_type(task_lower)
         
         # Keyword counts
-        signals["high_keywords"] = self._count_keywords(task_lower, self.HIGH_INDICATORS["keywords"])
-        signals["medium_keywords"] = self._count_keywords(task_lower, self.MEDIUM_INDICATORS["keywords"])
-        signals["low_keywords"] = self._count_keywords(task_lower, self.LOW_INDICATORS["keywords"])
+        signals["high_keywords"] = self._count_keywords(task_lower, self._high_keywords)
+        signals["medium_keywords"] = self._count_keywords(task_lower, self._medium_keywords)
+        signals["low_keywords"] = self._count_keywords(task_lower, self._low_keywords)
         
         # File/directory count hints
         signals["file_hints"] = self._extract_file_hints(task)
@@ -399,7 +416,12 @@ Respond with ONLY the complexity level, nothing else. Example response: medium
             return "high", 0.9, f"File hint suggests {file_hints} files"
         
         if effective_high_kw >= 2:
-            return "high", 0.85, f"Multiple high-complexity keywords ({effective_high_kw}, including learned)"
+            learned = effective_high_kw - high_kw
+            if learned > 0:
+                reason = f"Multiple high-complexity keywords ({effective_high_kw}, including {learned:.1f} from learned history)"
+            else:
+                reason = f"Multiple high-complexity keywords ({effective_high_kw})"
+            return "high", 0.85, reason
         
         if task_type == "architecture":
             return "high", 0.9, "Architecture task"
