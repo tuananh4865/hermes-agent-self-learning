@@ -372,6 +372,9 @@ DEFAULT_CONFIG = {
         # Sends a status message every N seconds so the user knows the
         # agent hasn't died during long tasks.  0 = disable notifications.
         "gateway_notify_interval": 600,
+        # Save conversation trajectories to JSONL files for self-learning.
+        # When enabled, the proactive planner + outcome evaluator activate.
+        "save_trajectories": true,
     },
     
     "terminal": {
