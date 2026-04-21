@@ -1729,7 +1729,8 @@ class HermesCLI:
         self.checkpoints_enabled = checkpoints or cp_cfg.get("enabled", False)
         self.checkpoint_max_snapshots = cp_cfg.get("max_snapshots", 50)
         self.pass_session_id = pass_session_id
-        
+        self.save_trajectories = save_trajectories
+
         # Ephemeral system prompt: env var takes precedence, then config
         self.system_prompt = (
             os.getenv("HERMES_EPHEMERAL_SYSTEM_PROMPT", "")
@@ -2899,7 +2900,7 @@ class HermesCLI:
                 session_db=self._session_db,
                 clarify_callback=self._clarify_callback,
                 reasoning_callback=self._current_reasoning_callback(),
-                save_trajectories=save_trajectories if save_trajectories is not None else CLI_CONFIG.get("agent", {}).get("save_trajectories", False),
+                save_trajectories=self.save_trajectories if self.save_trajectories is not None else CLI_CONFIG.get("agent", {}).get("save_trajectories", False),
                 fallback_model=self._fallback_model,
                 thinking_callback=self._on_thinking,
                 checkpoints_enabled=self.checkpoints_enabled,
