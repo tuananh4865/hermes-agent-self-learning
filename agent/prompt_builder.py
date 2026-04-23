@@ -455,6 +455,121 @@ def build_environment_hints() -> str:
     return "\n\n".join(hints)
 
 
+# =========================================================================
+# Wiki orientation — Karpathy's LLM Wiki
+# =========================================================================
+
+def _get_wiki_path() -> Optional[Path]:
+    """Resolve the wiki path from config, env var, or default ~/wiki."""
+    # Try config first: skills.config.wiki.path
+    try:
+        from hermes_cli.config import load_config
+        cfg = load_config()
+        wiki_path_cfg = cfg.get("skills", {}).get("config", {}).get("wiki", {}).get("path")
+        if wiki_path_cfg:
+            p = Path(wiki_path_cfg).expanduser().resolve()
+            if p.exists():
+                return p
+    except Exception:
+        pass
+    # Fall back to WIKI_PATH env var or default ~/wiki
+    env_path = os.environ.get("WIKI_PATH", "").strip()
+    if env_path:
+        p = Path(env_path).expanduser().resolve()
+        if p.exists():
+            return p
+    default = Path.home() / "wiki"
+    if default.exists():
+        return default
+    # Known fallback: wiki on external/storage volume (Hermes standard setup)
+    storage_wiki = Path("/Volumes/Storage-1/Hermes/wiki")
+    if storage_wiki.exists():
+        return storage_wiki
+    return None
+
+
+def build_wiki_system_prompt() -> str:
+    """Return a compact wiki orientation block for the system prompt.
+
+    Reads the wiki's domain (from SCHEMA.md), recent activity (last ~30 log
+    entries), and page count. Returns empty string if no wiki is found.
+    """
+    wiki_path = _get_wiki_path()
+    if wiki_path is None:
+        return ""
+
+    sections: list[str] = []
+
+    # Domain from SCHEMA.md (first non-empty lines after frontmatter)
+    schema_file = wiki_path / "SCHEMA.md"
+    if schema_file.exists():
+        try:
+            content = schema_file.read_text(encoding="utf-8")
+            # Strip frontmatter
+            if content.startswith("---"):
+                end = content.find("\n---\n", 3)
+                if end != -1:
+                    content = content[end + 5:]
+            # Get first meaningful lines
+            domain_lines = []
+            for line in content.splitlines():
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#") and not domain_lines:
+                    continue
+                if stripped.startswith("#"):
+                    break
+                domain_lines.append(stripped)
+                if len(domain_lines) >= 6:
+                    break
+            if domain_lines:
+                domain_text = " | ".join(d for d in domain_lines if d)
+                sections.append(f"Wiki domain: {domain_text}")
+        except Exception:
+            pass
+
+    # Recent activity from log.md (last ~30 lines)
+    log_file = wiki_path / "log.md"
+    if log_file.exists():
+        try:
+            lines = log_file.read_text(encoding="utf-8").splitlines()
+            # Skip header lines (first few lines that look like markdown headers)
+            tail = lines[-60:] if len(lines) > 60 else lines
+            # Skip markdown header lines
+            start_idx = 0
+            for i, line in enumerate(tail):
+                stripped = line.strip()
+                if stripped.startswith("#") or stripped.startswith(">") or stripped.startswith("|") or stripped == "":
+                    start_idx = i + 1
+                else:
+                    break
+            tail = tail[start_idx:]
+            if tail:
+                sections.append(f"Recent wiki activity:\n" + "\n".join(tail[-30:]))
+        except Exception:
+            pass
+
+    # Page count
+    count = 0
+    for subdir in ("entities", "concepts", "comparisons", "queries"):
+        sub = wiki_path / subdir
+        if sub.exists():
+            count += len(list(sub.glob("*.md")))
+    if count > 0:
+        sections.append(f"Wiki size: ~{count} compiled pages")
+
+    if not sections:
+        return ""
+
+    return (
+        "## Wiki Knowledge Base\n"
+        "Your wiki is available at: " + str(wiki_path) + "\n"
+        + "\n".join(sections) + "\n\n"
+        "When the user asks about wiki contents or research, "
+        "load the llm-wiki skill with skill_view(name='llm-wiki') and follow its "
+        "orientation steps before taking any action."
+    )
+
+
 CONTEXT_FILE_MAX_CHARS = 20_000
 CONTEXT_TRUNCATE_HEAD_RATIO = 0.7
 CONTEXT_TRUNCATE_TAIL_RATIO = 0.2

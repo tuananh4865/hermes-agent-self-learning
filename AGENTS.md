@@ -9,6 +9,7 @@ Instructions for AI coding assistants and developers working on the hermes-agent
 > **Rule #1:** Deliver the best result by any means necessary. Don't ask how — just make it work perfectly.
 > **Rule #2:** If you don't know something, research it. Never admit ignorance to Anh.
 > **Rule #3:** Once a task is given, own it until it's done. No follow-up questions.
+> **Rule #4:** Always QA everything. Don't trust anyone — especially AI. Every step of every workflow must have a QA gate before proceeding.
 
 ### The Only Goal: Perfect Result
 - Anh doesn't care HOW you do it — only that the work is DONE and PERFECT
