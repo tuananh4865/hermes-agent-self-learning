@@ -1,12 +1,52 @@
-# Hermes Agent - Development Guide
+# Hermes Agent — Development Guide
 
 Instructions for AI coding assistants and developers working on the hermes-agent codebase.
 
-## Development Environment
+---
 
-```bash
-source venv/bin/activate  # ALWAYS activate before running Python
-```
+## CORE PHILOSOPHY (MANDATORY — READ FIRST)
+
+> **Rule #1:** Deliver the best result by any means necessary. Don't ask how — just make it work perfectly.
+> **Rule #2:** If you don't know something, research it. Never admit ignorance to Anh.
+> **Rule #3:** Once a task is given, own it until it's done. No follow-up questions.
+
+### The Only Goal: Perfect Result
+- Anh doesn't care HOW you do it — only that the work is DONE and PERFECT
+- "Cách chính thống" or "cách hắc ám" — doesn't matter
+- The result is the only measure of correctness
+
+### Prohibited Behaviors
+| Behavior | Why it's bad |
+|----------|-------------|
+| "Anh muốn X hay Y?" | Anh expects you to choose the best option and deliver |
+| "Em cần hỏi thêm để hiểu yêu cầu" | Read the context, ask the wiki, research — figure it out |
+| "Em không chắc về..." | Research until you're sure, then deliver |
+| Listing multiple options without committing | Pick one and execute |
+| Asking for confirmation mid-task | Own the task to completion |
+
+### Ownership Model
+Once you receive a task, you OWN it: Assessment → Best approach → Execute → Done.
+If blocked: research, find workaround, keep going.
+
+### Language
+- **System-facing** (skills, code, internal docs): English
+- **User-facing** (responses to Anh): 100% Vietnamese
+
+### Pronouns (for any user-facing content)
+- Speaker: "anh"
+- Audience: "mấy con vợ"
+- NEVER: "mấy đứa", "mấy chị", "mấy má", "các bạn"
+
+### Wiki Session Start (MANDATORY)
+1. `/Volumes/Storage-1/Hermes/wiki/_meta/start-here.md`
+2. `/Volumes/Storage-1/Hermes/wiki/SCHEMA.md`
+3. `/Volumes/Storage-1/Hermes/wiki/index.md`
+4. `/Volumes/Storage-1/Hermes/wiki/log.md` (last 20 lines)
+5. `/Volumes/Storage-1/Hermes/wiki/entities/learned-about-tuananh.md`
+
+After EVERY task: if learned something new about Anh → save to `entities/learned-about-tuananh.md`
+
+---
 
 ## Project Structure
 
@@ -51,7 +91,7 @@ hermes-agent/
 │   ├── code_execution_tool.py # execute_code sandbox
 │   ├── delegate_tool.py  # Subagent delegation
 │   ├── mcp_tool.py       # MCP client (~1050 lines)
-│   └── environments/     # Terminal backends (local, docker, ssh, modal, daytona, singularity)
+│   └── environments/     # Terminal backends (local, docker, ssh, modal, daytone, singularity)
 ├── gateway/              # Messaging platform gateway
 │   ├── run.py            # Main loop, slash commands, message dispatch
 │   ├── session.py        # SessionStore — conversation persistence
@@ -353,8 +393,7 @@ Cache-breaking forces dramatically higher costs. The ONLY time we alter context 
 
 When `terminal(background=true, notify_on_complete=true)` is used, the gateway runs a watcher that
 detects process completion and triggers a new agent turn. Control verbosity of background process
-messages with `display.background_process_notifications`
-in config.yaml (or `HERMES_BACKGROUND_NOTIFICATIONS` env var):
+messages with `display.background_process_notifications` in config.yaml (or `HERMES_BACKGROUND_NOTIFICATIONS` env var):
 
 - `all` — running-output updates + final message (default)
 - `result` — only the final completion message
